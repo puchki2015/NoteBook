@@ -1,0 +1,113 @@
+We will have 3 types of table:
+a. Bronze( copy of source table)
+b. Silver (transforming of data according to business logic)
+c. Gold(Final table to be consumed by users)
+
+
+a. Stream records from Source table:
+
+oh_streaming_df=spark.readStream.format("delta").option("ignoreChanges", True).table("schema.tablename1").where("to_date(modifyTS) >= DATE_SUB(CURRENT_DATE,2)")
+
+Function to upsert record to tablename1 table:
+
+def orderHeaderUpsert(microBatchOutputDF, batchId):
+  
+  microBatchOutputDF.select("orderHeaderKey", expr("struct(modifyTS as max_rcvd_ts, *) as cols")).groupBy("PrimaryKey").agg(max("cols").alias("latest")).select("latest.*").drop("max_rcvd_ts").createOrReplaceTempView("trans_table")
+  
+  microBatchOutputDF._jdf.sparkSession().sql("""
+MERGE INTO SRC_SCHEMA.<tab1> TGT
+ USING trans_table SRC ON (SRC.PrimaryKey = TGT.PrimaryKey)
+ WHEN MATCHED THEN UPDATE
+ SET *
+ WHEN NOT MATCHED THEN 
+ INSERT *
+ """) 
+ 
+ 
+ Load streaming records to tablename1_history:
+ 
+ 
+ ( oh_streaming_df.writeStream
+    .format("delta")
+    .outputMode("append")
+    .option("checkpointLocation", "dbfs:/mnt/<storage>/checkpoints/bronze_tab_history")
+    .start("dbfs:/mnt/<storage>/<container>/src_schema/trans_table_history"))
+    
+    
+    
+Load records to trans_table (exact copy of source)    :
+
+
+%python
+( oh_streaming_df.writeStream
+    .format("delta")
+    .foreachBatch(orderHeaderUpsert) 
+    .outputMode("update")
+    .option("checkpointLocation", "dbfs:/mnt/<storage>/checkpoints/bronze_tab")
+    .start())
+    
+    
+    
+    ===============================================================
+    
+    
+    Now Silver/Gold Table based on rquirement:
+    
+    Import Required Libraries
+
+from pyspark.sql import functions as F
+from pyspark.sql.functions import expr, to_timestamp
+
+src_oh_streaming_df=spark.readStream.format("delta").option("ignoreChanges", True).table("src_schema.trans_table")
+
+
+%python
+def orderMbrFraudUpsert(microBatchOutputDF, batchId):
+  microBatchOutputDF.createOrReplaceTempView("TEST_TABLE")
+  
+  microBatchOutputDF._jdf.sparkSession().sql(""" drop table if exists STG_SCHEMA.TAB_STG """)
+  
+  microBatchOutputDF._jdf.sparkSession().sql(""" 
+create table STG_SCHEMA.TAB_STG as 
+SELECT 
+	FIELD1,
+	FIELD2
+ FROM
+    TEST_TABLE SRC """)
+  
+  microBatchOutputDF._jdf.sparkSession().sql(""" drop table if exists STG_SCHEMA.TAB_STG_FINAL """)
+  
+  microBatchOutputDF._jdf.sparkSession().sql("""
+  create table STG_SCHEMA.TAB_STG_FINAL as 
+SELECT     
+    DIELD1,
+	FIELD2,
+	FIELD3
+FROM
+    STG_SCHEMA.TAB_STG SRC
+LEFT JOIN STG_SCHEMA.TAB_STG VT_RET 
+    ....
+	....
+ """)
+  
+  microBatchOutputDF._jdf.sparkSession().sql("""
+MERGE INTO FINAL_TGT.FINAL_TAB TGT
+ USING STG_SCHEMA.TAB_STG_FINAL SRC ON (SRC.FIELD1 = TGT.FIELD1 AND SRC.ORDER_SK_ID = TGT.ORDER_SK_ID)
+ WHEN MATCHED AND SRC.MODIFYTS > TGT.DW_MODIFY_TS THEN UPDATE
+ SET
+      FIELD1                    =     SRC.FIELD1
+    , FIELD2              =     SRC.FIELD2
+ WHEN NOT MATCHED THEN 
+ INSERT *
+ """) 
+ 
+ 
+ =======================
+ 
+  %python
+( src_oh_streaming_df.writeStream
+    .format("delta")
+    .foreachBatch(orderMbrFraudUpsert) 
+    .outputMode("update")
+    .option("checkpointLocation", "dbfs:/mnt/<STORAGEACCOUNT>/checkpoints/gold_schema")
+    .start())

@@ -1,0 +1,157 @@
+Notebook Scripts for one process:
+dbutils.widgets.removeAll()
+%python
+import json  
+params={}
+params['scope'] = dbutils.widgets.get('scope')
+params['key'] = dbutils.widgets.get('key')
+params['general_container'] = dbutils.widgets.get('storage_container')
+params['azure_storage_acct_name'] = dbutils.widgets.get('azure_storage_acct_name')
+wf = dbutils.widgets.get('wf')
+print(wf)
+%python
+secret = dbutils.secrets.get(scope= params['scope'], key= params['key'])
+spark.conf.set("fs.azure.sas."+params['general_container']+"."+params['azure_storage_acct_name']+".blob.core.windows.net",secret)
+set spark.databricks.delta.properties.defaults.autoOptimize.optimizeWrite = true;
+set spark.databricks.delta.properties.defaults.autoOptimize.autoCompact = true;
+set spark.databricks.delta.snapshotPartitions = 500;
+set spark.sql.shuffle.partitions = 100;
+
+
+Data Availability Module
+
+
+%python 
+import time 
+from datetime import datetime,date
+
+t1 = datetime.now()
+to_day = datetime.now().date()
+print(to_day)
+print(t1)
+
+
+tbls_lst = ["Schema.Tab1,Schema.Tab2,Schema.Tab3"]
+
+
+ref_dt_lst = {}
+# waiting_lst = []
+cnt = 1
+recnt = 0
+
+def find_mdts(tbls_lst,recnt):
+  recnt += 1
+  waiting_lst = []
+  print("recnt :",recnt)
+  for i in tbls_lst:
+    mdfy_ts = spark.sql(f"describe history {i}").take(1)
+    ref_date = mdfy_ts[0]['timestamp'].date()
+    if i == "US_CORE_DIM_VM.CALENDAR_DIM":
+      ref_dt_lst[i] = ref_date
+    elif ref_date == to_day:
+      ref_dt_lst[i] = ref_date
+      print(f"Table {i} is refreshed on:",ref_date)
+    else :
+      ref_date!= to_day
+      waiting_lst.append(i)
+      print(f"table: {i} not yet refreshed today")
+  if len(waiting_lst) > 0 and recnt < 5:
+    time.sleep(2)
+    print(f"\n*********************** RETRIGGERING AFTER SLEEP {recnt} ********************")
+    try:
+      find_mdts(waiting_lst,recnt)
+      if ref_date!= to_day:
+        raise ValueError('TABLES NOT YET REFREHED')
+      else:
+          print("tables are refreshed")
+    finally:
+      pass
+  else:
+    print ("closing the module")
+
+     
+find_mdts(tbls_lst,recnt) 
+print(ref_dt_lst)
+print(len(ref_dt_lst))      
+
+
+
+%python
+try:
+  proc_run_strt=dbutils.notebook.run("/Shared/ /process_run/WF_PROCESS_RUN_DETAIL_START",60,{"wf_name":wf})
+  if proc_run_strt == "success":
+    print("WF_PROCESS_RUN_DETAIL_START completed successfully")
+  else:
+    raise 
+except:
+  raise Exception("WF_PROCESS_RUN_DETAIL_START did not complete successfully")
+
+
+%python
+try:
+  proc_run_end=dbutils.notebook.run("/Shared/ /process_run/WF_PROCESS_RUN_DETAIL_END",60,{"wf_name":wf})
+  if proc_run_end == "success":
+    print("WF_PROCESS_RUN_DETAIL_END completed successfully")
+  else:
+    raise 
+except:
+  raise Exception("WF_PROCESS_RUN_DETAIL_END did not complete successfully")
+
+%python
+dbutils.notebook.exit("success")
+
+
+
+So internally it calls 2 notebook:
+1.	/Shared/sams_ecommerce/process_run/WF_PROCESS_RUN_DETAIL_START
+%python
+wf = dbutils.widgets.get("wf_name")
+print(wf)
+sql="""
+select max(p.process_id) as process_id,max(coalesce(pd.process_run_id,0))+1 AS process_run_id 
+from schema_tgt.PROCESS_RUN p 
+left join schema_tgt.process_run_detail pd on p.process_id = pd.process_id WHERE p.process_name ='{wf}'
+"""
+process_qry = spark.sql(sql.format(tgt_schema="samsdseecomm_tgt",wf=wf)).first()
+process_id = process_qry[0]
+process_run_id = process_qry[1]
+
+print("process_id: ",process_id,"process_run_id: ",process_run_id)
+
+if process_run_id is None or process_id is None :
+  raise Exception("Process id is null")
+
+query = """ insert into schema_tgt.process_run_detail values(CAST({process_id} as INT),CAST({process_run_id} as INT),CURRENT_TIMESTAMP(),NULL,'STARTED',CURRENT_TIMESTAMP())"""
+
+spark.sql(query.format(tgt_schema="schema_tgt",process_id=process_id,process_run_id=process_run_id))
+
+
+
+
+2.	/Shared /process_run/WF_PROCESS_RUN_DETAIL_END
+
+%python
+
+process_sql = """select max(p.process_id) as process_id,max(coalesce(pd.process_run_id,0)),max(start_time) AS start_time 
+,current_timestamp() as end_time
+,'COMPLETED' as process_status
+,max(load_time) as load_time
+from schema_tgt.PROCESS_RUN p 
+left join schema_tgt.process_run_detail pd on p.process_id = pd.process_id WHERE p.process_name ='{wf}'
+"""
+
+process_qry = spark.sql(process_sql.format(tgt_schema="schema_tgt",wf=wf)).first()
+process_id = process_qry[0]
+process_run_id = process_qry[1]
+process_start_time = process_qry[2]
+process_end_time = process_qry[3]
+process_load_time = process_qry[5]
+
+print("process_id: ",process_id,"\nprocess_run_id: ",process_run_id,"\process_start_time: ",process_run_id,"\nprocess_end_time: ",process_end_time,"\nprocess_load_time: ",process_load_time)
+
+if process_run_id is None or process_id is None :
+  raise Exception("Process id is null")
+
+process_end_insert = """ insert into schema_tgt.process_run_detail values(CAST({process_id} as INT),CAST({process_run_id} as INT),CAST('{process_start_time}' as TIMESTAMP),CURRENT_TIMESTAMP(),'COMPLETED',CAST('{process_load_time}' as TIMESTAMP))"""
+
+spark.sql(process_end_insert.format(tgt_schema="schema_tgt",process_id=process_id,process_run_id=process_run_id,process_start_time=process_start_time,process_load_time=process_load_time))

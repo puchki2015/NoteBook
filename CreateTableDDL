@@ -1,0 +1,28 @@
+DROP TABLE IF EXISTS schema.tab1;
+CREATE TABLE schema.tab1 
+(
+field1 STRING not null,
+field2 STRING not null,
+field3 STRING
+)
+USING delta
+location 'dbfs:/mnt/<storage_account>/<container1>/<container2>/tab1'
+tblproperties (delta.autoOptimize.optimizeWrite = true, delta.autoOptimize.autoCompact = true)
+
+%python
+dbutils.fs.rm("dbfs:/mnt/<storage_account>/<container1>/<container2>/tab1",True)
+
+=======================================================================================================
+
+drop database if exists <database1>;
+
+create database <database1>
+comment 'Schema for Streaming  Tables'
+location 'dbfs:/mnt/<storageaccount>/<container>/<database1>';
+
+%sql 
+drop table if exists database1.table1;
+
+create table database1.table1 (field1 string, entry_type_desc string)
+using delta
+location  'dbfs:/mnt/<storageaccount>/<containe1>/<database1>/table1';
